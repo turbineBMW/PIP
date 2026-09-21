@@ -4,6 +4,7 @@ import Quickshell.Wayland
 import Quickshell.Hyprland
 import Quickshell.Services.Mpris
 import QtQuick
+import QtQuick.Controls
 import qs.Commons
 
 // Edge-docked picture-in-picture.
@@ -12,7 +13,7 @@ import qs.Commons
 // the four screen edges. While the pointer is over it, the window slides off
 // past its edge and a small tab takes its place, so whatever was underneath
 // can be seen and clicked without moving the PiP. The tab carries a close
-// button, a resize button, play/pause (when the PiP's player speaks MPRIS)
+// button, resize and opacity buttons, play/pause (when the PiP's player speaks MPRIS)
 // and a handle: drag the handle to re-dock the PiP
 // anywhere along any edge, or click it to bring the PiP back under the pointer
 // until the pointer leaves (to reach the player's own controls). The resize
@@ -23,7 +24,7 @@ import qs.Commons
 //   { "id": "turbinebmw.pip", "margin": 10, "hideDelay": 0, "showDelay": 120,
 //     "pollInterval": 33, "autoHide": true }
 //
-// IPC: omarchy-shell pip <toggle|peek|resize|playPause|close>
+// IPC: omarchy-shell pip <toggle|peek|resize|transparency|playPause|close>
 Item {
   id: root
 
@@ -78,13 +79,71 @@ Item {
           root.along = Math.max(0, Math.min(1, Number(saved.along) || 0))
           root.dockRestored = true
         }
+        if (typeof saved.opacity === "number" && isFinite(saved.opacity))
+          root.pipOpacity = root.clamp(saved.opacity, 0.1, 1)
         root.savedWidth = Math.max(0, Math.round(Number(saved.width) || 0))
       } catch (e) {}
     }
   }
 
   function saveDock() {
-    dockFile.setText(JSON.stringify({ edge: root.edge, along: root.along, width: root.savedWidth }) + "\n")
+    dockFile.setText(JSON.stringify({ edge: root.edge, along: root.along, width: root.savedWidth, opacity: root.pipOpacity }) + "\n")
+  }
+
+  // Keep the last chosen opacity across PiP windows and shell reloads.
+  property real pipOpacity: 1
+  property var originalOpacity: []
+  readonly property var opacityProps: ["opacity", "opacity_inactive", "opacity_override", "opacity_inactive_override", "no_blur"]
+
+  function dispatchOpacity(values) {
+    var commands = opacityProps.map((prop, i) =>
+      (i === opacityProps.length - 1 ? "return " : "hl.dispatch(") + "hl.dsp.window.set_prop({ window = 'address:" + pipAddress
+      + "', prop = '" + prop + "', value = '" + values[i] + "' })" + (i === opacityProps.length - 1 ? "" : ")"))
+    Hyprland.dispatch("(function() " + commands.join(" ") + " end)()")
+  }
+
+  function applyOpacity() {
+    if (!active || originalOpacity.length !== opacityProps.length) return
+    var value = pipOpacity.toFixed(2)
+    dispatchOpacity([value, value, "1", "1", pipOpacity < 1 ? "1" : originalOpacity[4]])
+  }
+
+  function clearOpacity() {
+    opacityTimer.stop()
+    if (active && originalOpacity.length === opacityProps.length) dispatchOpacity(originalOpacity)
+    originalOpacity = []
+  }
+
+  // Read the existing active/inactive values before overriding them, so unloading
+  // or losing the PiP tag can restore the window's previous appearance.
+  function captureOpacity() {
+    if (!active || opacityRead.running) return
+    opacityRead.address = pipAddress
+    opacityRead.command = ["hyprctl", "--batch", opacityProps.map(prop =>
+      "getprop address:" + pipAddress + " " + prop).join(";")]
+    opacityRead.running = true
+  }
+
+  Process {
+    id: opacityRead
+    property string address: ""
+    stdout: StdioCollector {
+      onStreamFinished: {
+        if (opacityRead.address !== root.pipAddress) return
+        var values = text.trim().split(/\s+/).map(v => v === "true" ? "1" : v === "false" ? "0" : v)
+        if (values.length !== root.opacityProps.length || values.some(v => !isFinite(Number(v)))) return
+        root.originalOpacity = values
+        root.applyOpacity()
+      }
+    }
+    onExited: if (root.active && address !== root.pipAddress) root.captureOpacity()
+  }
+
+  // Coalesce slider movement to one compositor update per frame.
+  Timer {
+    id: opacityTimer
+    interval: 16
+    onTriggered: root.applyOpacity()
   }
 
   // ---- state ---------------------------------------------------------------
@@ -103,7 +162,7 @@ Item {
 
   // shown: PiP at its dock. hidden: PiP parked off-screen, tab in its place.
   // peek: PiP at its dock and immune to hover until the pointer leaves.
-  // resize: peek, plus corner grips.
+  // resize: peek, plus corner grips. opacity: peek, plus a live slider.
   property string mode: "shown"
 
   property bool dragging: false
@@ -305,6 +364,7 @@ Item {
   }
 
   function release() {
+    clearOpacity()
     pipAddress = ""
     mode = "shown"
     dragging = false
@@ -331,6 +391,7 @@ Item {
       // Adopt: keep the remembered dock, or else the edge it opened nearest to.
       var monitors = Hyprland.monitors ? Hyprland.monitors.values : []
       var monitor = monitors.find(m => m.id === pip.monitor)
+      clearOpacity()
       pipAddress = pip.address
       pipPid = pip.pid || 0
       pipClass = pip.class || pip.initialClass || ""
@@ -343,6 +404,7 @@ Item {
         along = dock.along
       }
       mode = "shown"
+      captureOpacity()
       if (savedWidth > 0 && Math.abs(savedWidth - w) > 1 && w > 0 && h > 0) {
         var maxW = Math.min(usable.width - 2 * margin, (usable.height - 2 * margin) * w / h)
         pipW = Math.round(Math.min(savedWidth, maxW))
@@ -419,12 +481,15 @@ Item {
   onUsableChanged: if (active && !dragging) { if (mode === "hidden") hide(false); else show(true) }
 
   Component.onCompleted: scan()
-  Component.onDestruction: if (active && mode === "hidden") show(false)
+  Component.onDestruction: {
+    if (active && mode === "hidden") show(false)
+    clearOpacity()
+  }
 
   // ---- pointer -------------------------------------------------------------
 
   Process {
-    running: root.active && root.autoHide
+    running: root.active && (root.autoHide || root.mode === "opacity")
     command: [root.pluginDir + "scripts/cursor-watch", String(root.pollInterval)]
     stdout: SplitParser {
       onRead: line => {
@@ -438,6 +503,10 @@ Item {
 
   function evaluate() {
     if (!active || dragging || resizing || cursorX < 0) return
+    if (mode === "opacity") {
+      if (!opacitySlider.pressed && !inside(zone, cursorX, cursorY, 6)) mode = "shown"
+      return
+    }
     if (!autoHide) {
       if (mode !== "shown") setMode("shown")
       return
@@ -479,6 +548,7 @@ Item {
     function toggle(): string { root.autoHide = !root.autoHide; return root.autoHide ? "on" : "off" }
     function peek(): string { if (root.active) root.setMode("peek"); return root.active ? "ok" : "no pip" }
     function resize(): string { if (root.active) root.setMode("resize"); return root.active ? "ok" : "no pip" }
+    function transparency(): string { if (root.active) root.setMode("opacity"); return root.active ? "ok" : "no pip" }
     function playPause(): string { root.playPause(); return root.player ? "ok" : "no player" }
     function close(): string { root.closePip(); return root.active ? "ok" : "no pip" }
   }
@@ -504,6 +574,7 @@ Item {
       item: tab.shown ? tab : null
       Region { item: root.mode === "resize" ? gripA : null }
       Region { item: root.mode === "resize" ? gripB : null }
+      Region { item: root.mode === "opacity" ? opacityPanel : null }
     }
 
     readonly property real originX: root.pipScreen ? root.pipScreen.x : 0
@@ -525,6 +596,80 @@ Item {
 
       Behavior on x { NumberAnimation { duration: 90; easing.type: Easing.OutCubic } }
       Behavior on y { NumberAnimation { duration: 90; easing.type: Easing.OutCubic } }
+    }
+
+    // Only this compact panel intercepts input; the video stays visible behind it.
+    Rectangle {
+      id: opacityPanel
+      visible: root.mode === "opacity"
+      x: root.home.x - overlay.originX + (root.home.width - width) / 2
+      y: root.home.y - overlay.originY + (root.home.height - height) / 2
+      width: Math.max(120, Math.min(260, root.home.width - 16))
+      height: 68
+      radius: Style.cornerRadius
+      color: Color.menu.background
+      border.width: 1
+      border.color: Util.alpha(Color.menu.text, 0.25)
+
+      // Absorb clicks in the panel padding instead of passing them to the player.
+      MouseArea { anchors.fill: parent }
+
+      Text {
+        x: 12
+        y: 8
+        text: "Opacity  " + Math.round(root.pipOpacity * 100) + "%"
+        color: Color.menu.text
+        font.family: Style.fontFamily
+        font.pixelSize: 12
+      }
+
+      Slider {
+        id: opacitySlider
+        x: 12
+        y: 30
+        width: parent.width - 24
+        height: 30
+        from: 0.1
+        to: 1
+        stepSize: 0.01
+        value: root.pipOpacity
+        Accessible.name: "PiP opacity"
+        onMoved: {
+          root.pipOpacity = value
+          if (!opacityTimer.running) opacityTimer.start()
+        }
+        onPressedChanged: {
+          if (!pressed) {
+            opacityTimer.stop()
+            root.applyOpacity()
+            root.saveDock()
+            root.evaluate()
+          }
+        }
+
+        background: Rectangle {
+          x: opacitySlider.leftPadding
+          y: (opacitySlider.height - height) / 2
+          width: opacitySlider.availableWidth
+          height: 4
+          radius: 2
+          color: Util.alpha(Color.menu.text, 0.25)
+          Rectangle {
+            width: opacitySlider.visualPosition * parent.width
+            height: parent.height
+            radius: 2
+            color: Color.menu.text
+          }
+        }
+        handle: Rectangle {
+          x: opacitySlider.leftPadding + opacitySlider.visualPosition * (opacitySlider.availableWidth - width)
+          y: (opacitySlider.height - height) / 2
+          width: 16
+          height: 16
+          radius: 8
+          color: Color.menu.text
+        }
+      }
     }
 
     // Resize mode: a frame around the PiP and a grip on each inner corner.
@@ -632,7 +777,7 @@ Item {
       readonly property bool vertical: onEdge === "left" || onEdge === "right"
       readonly property bool shown: root.active && (root.mode === "hidden" || root.dragging)
       readonly property int thickness: 30
-      readonly property int length: root.player ? 126 : 100
+      readonly property int length: root.player ? 152 : 126
       readonly property int rounding: 10
 
       // 0 tucked past the edge, 1 fully out.
@@ -726,6 +871,40 @@ Item {
         }
       }
 
+      // Opacity: overlapping squares suggest seeing through the PiP.
+      Rectangle {
+        id: opacityButton
+        width: 22
+        height: 22
+        radius: 6
+        x: tab.vertical ? (tab.width - width) / 2 : resizeButton.x - width - 4
+        y: tab.vertical ? resizeButton.y + resizeButton.height + 4 : (tab.height - height) / 2
+        color: opacityArea.pressed ? Util.alpha(Color.menu.text, 0.22)
+          : opacityArea.containsMouse ? Util.alpha(Color.menu.text, 0.12) : "transparent"
+        Rectangle {
+          x: 4; y: 4; width: 10; height: 10; radius: 2
+          color: "transparent"
+          border.width: 1
+          border.color: Color.menu.text
+        }
+        Rectangle {
+          x: 8; y: 8; width: 10; height: 10; radius: 2
+          color: Util.alpha(Color.menu.text, 0.5)
+          border.width: 1
+          border.color: Color.menu.text
+        }
+        ToolTip.visible: opacityArea.containsMouse
+        ToolTip.text: "Adjust opacity"
+        ToolTip.delay: 500
+        MouseArea {
+          id: opacityArea
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.setMode("opacity")
+        }
+      }
+
       // Play / pause, when the PiP's player is on MPRIS.
       Rectangle {
         id: playButton
@@ -734,8 +913,8 @@ Item {
         width: 22
         height: 22
         radius: 6
-        x: tab.vertical ? (tab.width - width) / 2 : resizeButton.x - width - 4
-        y: tab.vertical ? resizeButton.y + resizeButton.height + 4 : (tab.height - height) / 2
+        x: tab.vertical ? (tab.width - width) / 2 : opacityButton.x - width - 4
+        y: tab.vertical ? opacityButton.y + opacityButton.height + 4 : (tab.height - height) / 2
         color: playArea.pressed ? Util.alpha(Color.menu.text, 0.22)
           : playArea.containsMouse ? Util.alpha(Color.menu.text, 0.12) : "transparent"
 
@@ -785,7 +964,7 @@ Item {
         id: handle
         radius: 6
         x: tab.vertical ? 4 : 6
-        readonly property Item lastButton: playButton.visible ? playButton : resizeButton
+        readonly property Item lastButton: playButton.visible ? playButton : opacityButton
         y: tab.vertical ? lastButton.y + lastButton.height + 4 : 4
         width: tab.vertical ? tab.width - 8 : lastButton.x - 10
         height: tab.vertical ? tab.height - y - 6 : tab.height - 8
