@@ -26,6 +26,9 @@ player's own controls, resize it, adjust its opacity, or close it. A play/pause
 button appears when the player supports MPRIS. The last dock position, size, and
 opacity are remembered.
 
+While Omarchy's screensaver is open, the PiP and its controls tuck away
+automatically. The PiP returns to its saved dock when the screensaver closes.
+
 Click the overlapping-squares icon to bring the PiP back with an opacity slider.
 Drag it to adjust the window live from 10% to 100% opacity; move the pointer away
 from the PiP to dismiss the slider. The chosen opacity stays in effect whether
