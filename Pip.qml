@@ -13,11 +13,12 @@ import qs.Commons
 // the four screen edges. While the pointer is over it, the window slides off
 // past its edge and a small tab takes its place, so whatever was underneath
 // can be seen and clicked without moving the PiP. The tab carries a close
-// button, resize and opacity buttons, play/pause (when the PiP's player speaks MPRIS)
-// and a handle: drag the handle to re-dock the PiP
-// anywhere along any edge, or click it to bring the PiP back under the pointer
-// until the pointer leaves (to reach the player's own controls). The resize
-// button brings it back the same way, with grips on its two inner corners.
+// button, show, resize and opacity buttons, play/pause (when the PiP's player
+// speaks MPRIS) and a handle. The show button brings the PiP back under the
+// pointer until it leaves, so the player's own controls can be used. Drag the
+// handle to re-dock the PiP anywhere along any edge; clicking it also shows the
+// PiP. The resize button brings it back the same way, with grips on its two
+// inner corners.
 //
 // Settings are inline on this plugin's entry in ~/.config/omarchy/shell.json:
 //
@@ -794,7 +795,7 @@ Item {
       readonly property bool vertical: onEdge === "left" || onEdge === "right"
       readonly property bool shown: root.active && (root.mode === "hidden" || root.dragging)
       readonly property int thickness: 30
-      readonly property int length: root.player ? 152 : 126
+      readonly property int length: root.player ? 178 : 152
       readonly property int rounding: 10
 
       // 0 tucked past the edge, 1 fully out.
@@ -976,12 +977,75 @@ Item {
         }
       }
 
+      // Show: hold the PiP in place so its own controls can be used. Normal
+      // pointer dodging resumes as soon as the pointer leaves the PiP.
+      Rectangle {
+        id: showButton
+        width: 22
+        height: 22
+        radius: 6
+        x: tab.vertical ? (tab.width - width) / 2
+          : (playButton.visible ? playButton.x : opacityButton.x) - width - 4
+        y: tab.vertical
+          ? (playButton.visible ? playButton.y + playButton.height + 4
+            : opacityButton.y + opacityButton.height + 4)
+          : (tab.height - height) / 2
+        color: showArea.pressed ? Util.alpha(Color.menu.text, 0.22)
+          : showArea.containsMouse ? Util.alpha(Color.menu.text, 0.12) : "transparent"
+
+        // A small window with an eye: reveal the PiP and allow interaction.
+        Rectangle {
+          x: 3
+          y: 4
+          width: 16
+          height: 14
+          radius: 2
+          color: "transparent"
+          border.width: 1
+          border.color: Color.menu.text
+        }
+        Item {
+          x: 6
+          y: 8
+          width: 10
+          height: 6
+          Rectangle {
+            anchors.centerIn: parent
+            width: 9
+            height: 5
+            radius: 3
+            color: "transparent"
+            border.width: 1
+            border.color: Color.menu.text
+          }
+          Rectangle {
+            anchors.centerIn: parent
+            width: 3
+            height: 3
+            radius: 1.5
+            color: Color.menu.text
+          }
+        }
+
+        ToolTip.visible: showArea.containsMouse
+        ToolTip.text: "Show PiP controls"
+        ToolTip.delay: 500
+
+        MouseArea {
+          id: showArea
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.setMode("peek")
+        }
+      }
+
       // Handle: drag to re-dock, click to peek.
       Rectangle {
         id: handle
         radius: 6
         x: tab.vertical ? 4 : 6
-        readonly property Item lastButton: playButton.visible ? playButton : opacityButton
+        readonly property Item lastButton: showButton
         y: tab.vertical ? lastButton.y + lastButton.height + 4 : 4
         width: tab.vertical ? tab.width - 8 : lastButton.x - 10
         height: tab.vertical ? tab.height - y - 6 : tab.height - 8

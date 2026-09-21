@@ -21,10 +21,12 @@ packages or system settings are changed by the plugin installer.
 
 ## Use
 
-The tab lets you drag the PiP to another edge, bring it back to use the
-player's own controls, resize it, adjust its opacity, or close it. A play/pause
-button appears when the player supports MPRIS. The last dock position, size, and
-opacity are remembered.
+The tab lets you drag the PiP to another edge, show it to use the player's own
+controls, resize it, adjust its opacity, or close it. Click the window-and-eye
+button to reveal the PiP; it stays in place while the pointer is over it, then
+goes back to dodging the pointer after you leave. A play/pause button appears
+when the player supports MPRIS. The last dock position, size, and opacity are
+remembered.
 
 While Omarchy's screensaver is open, the PiP and its controls tuck away
 automatically. The PiP returns to its saved dock when the screensaver closes.
