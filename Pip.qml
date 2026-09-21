@@ -175,6 +175,7 @@ Item {
   property int cursorY: -1
 
   readonly property bool active: pipAddress !== ""
+  property bool screensaverActive: false
 
   readonly property var pipScreen: {
     var screens = Quickshell.screens
@@ -336,13 +337,15 @@ Item {
   function applySize() {
     if (!active) return
     var win = "'address:" + pipAddress + "'"
+    var target = screensaverActive ? parking() : home
     Hyprland.dispatch("(function() hl.dispatch(hl.dsp.window.set_prop({ window = " + win
       + ", prop = 'no_anim', value = '1' })) hl.dispatch(hl.dsp.window.resize({ window = " + win
       + ", x = " + pipW + ", y = " + pipH + " })) return hl.dsp.window.move({ window = " + win
-      + ", x = " + Math.round(home.x) + ", y = " + Math.round(home.y) + " }) end)()")
+      + ", x = " + Math.round(target.x) + ", y = " + Math.round(target.y) + " }) end)()")
   }
 
   function show(animate) {
+    if (screensaverActive) { hide(false); return }
     moveWindow(home.x, home.y, animate && parking().slide)
   }
 
@@ -352,6 +355,7 @@ Item {
   }
 
   function setMode(next) {
+    if (screensaverActive) return
     showTimer.stop()
     hideTimer.stop()
     if (next === "hidden") hide(mode !== "hidden")
@@ -382,6 +386,15 @@ Item {
   function applyClients(json) {
     var clients
     try { clients = JSON.parse(json) } catch (e) { return }
+    var wasScreensaverActive = screensaverActive
+    screensaverActive = clients.some(c => c.mapped && !c.hidden && c.class === "org.omarchy.screensaver")
+    if (screensaverActive) {
+      showTimer.stop()
+      hideTimer.stop()
+      dragging = false
+      resizing = false
+      mode = "shown"
+    }
     var pips = clients.filter(isPip)
     var pip = pips.find(c => c.address === pipAddress) || pips[0]
     if (!pip) { release(); return }
@@ -421,6 +434,10 @@ Item {
     var resized = w !== pipW || h !== pipH
     pipW = w
     pipH = h
+    // Pinned windows render above fullscreen screensavers. Park ours until
+    // every screensaver window closes, without treating that move as a new dock.
+    if (screensaverActive) { hide(false); return }
+    if (wasScreensaverActive) { show(false); evaluate(); return }
     if (mode === "hidden") {
       if (resized) hide(false)
       return
@@ -482,14 +499,14 @@ Item {
 
   Component.onCompleted: scan()
   Component.onDestruction: {
-    if (active && mode === "hidden") show(false)
+    if (active && (mode === "hidden" || screensaverActive)) moveWindow(home.x, home.y, false)
     clearOpacity()
   }
 
   // ---- pointer -------------------------------------------------------------
 
   Process {
-    running: root.active && (root.autoHide || root.mode === "opacity")
+    running: root.active && !root.screensaverActive && (root.autoHide || root.mode === "opacity")
     command: [root.pluginDir + "scripts/cursor-watch", String(root.pollInterval)]
     stdout: SplitParser {
       onRead: line => {
@@ -502,7 +519,7 @@ Item {
   }
 
   function evaluate() {
-    if (!active || dragging || resizing || cursorX < 0) return
+    if (!active || screensaverActive || dragging || resizing || cursorX < 0) return
     if (mode === "opacity") {
       if (!opacitySlider.pressed && !inside(zone, cursorX, cursorY, 6)) mode = "shown"
       return
@@ -560,7 +577,7 @@ Item {
   PanelWindow {
     id: overlay
 
-    visible: root.active
+    visible: root.active && !root.screensaverActive
     screen: root.pipScreen
     color: "transparent"
     anchors { top: true; bottom: true; left: true; right: true }
