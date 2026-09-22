@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "turbinebmw.pip",
   "name": "Edge PiP",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "turbinebmw",
   "license": "MIT",
   "description": "Docks picture-in-picture windows to a screen edge and tucks them into a tab while the pointer is over them.",
