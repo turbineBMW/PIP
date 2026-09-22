@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Stream the global cursor position, one "x y" line per change.
 
 Hyprland has no pointer-motion event on its sockets, so this polls the
@@ -23,6 +23,7 @@ def main():
     while True:
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(1.0)
                 sock.connect(path)
                 sock.sendall(b"cursorpos")
                 reply = sock.recv(64).decode()

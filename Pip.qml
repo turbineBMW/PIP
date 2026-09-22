@@ -36,6 +36,33 @@ Item {
   readonly property string pluginId: manifest && manifest.id ? manifest.id : "turbinebmw.pip"
   readonly property string pluginDir: Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "")
 
+  // Automatic subprocesses must not inherit PATH, loader hooks, Python hooks,
+  // or other ambient process configuration from the shell session.
+  function hyprlandEnvironment() {
+    var allowed = ({ LANG: "C", LC_ALL: "C" })
+    var runtimeDirectory = Quickshell.env("XDG_RUNTIME_DIR")
+    var instance = Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE")
+    if (runtimeDirectory) allowed.XDG_RUNTIME_DIR = runtimeDirectory
+    if (instance) allowed.HYPRLAND_INSTANCE_SIGNATURE = instance
+    return allowed
+  }
+
+  readonly property int opacityOutputLimit: 4096
+  readonly property int clientsOutputLimit: 1048576
+
+  function appendBoundedOutput(target, data, limit, description) {
+    if (target.failed) return
+    var chunk = String(data)
+    if (chunk.length > limit - target.collected.length) {
+      target.failed = true
+      target.collected = ""
+      console.warn(root.pluginId + ": " + description + " exceeded the output limit")
+      target.signal(9)
+      return
+    }
+    target.collected += chunk
+  }
+
   // ---- settings ------------------------------------------------------------
 
   property var settings: ({})
@@ -120,7 +147,9 @@ Item {
   function captureOpacity() {
     if (!active || opacityRead.running) return
     opacityRead.address = pipAddress
-    opacityRead.command = ["hyprctl", "--batch", opacityProps.map(prop =>
+    opacityRead.collected = ""
+    opacityRead.failed = false
+    opacityRead.command = ["/usr/bin/hyprctl", "--batch", opacityProps.map(prop =>
       "getprop address:" + pipAddress + " " + prop).join(";")]
     opacityRead.running = true
   }
@@ -128,16 +157,41 @@ Item {
   Process {
     id: opacityRead
     property string address: ""
-    stdout: StdioCollector {
-      onStreamFinished: {
-        if (opacityRead.address !== root.pipAddress) return
-        var values = text.trim().split(/\s+/).map(v => v === "true" ? "1" : v === "false" ? "0" : v)
-        if (values.length !== root.opacityProps.length || values.some(v => !isFinite(Number(v)))) return
-        root.originalOpacity = values
-        root.applyOpacity()
+    property string collected: ""
+    property bool failed: false
+    clearEnvironment: true
+    environment: root.hyprlandEnvironment()
+    workingDirectory: "/"
+    stdout: SplitParser {
+      // Raw chunks keep the parser from buffering an unlimited partial line.
+      splitMarker: ""
+      onRead: function(data) {
+        root.appendBoundedOutput(opacityRead, data, root.opacityOutputLimit, "hyprctl getprop output")
       }
     }
-    onExited: if (root.active && address !== root.pipAddress) root.captureOpacity()
+    onStarted: opacityReadDeadline.restart()
+    onExited: function(exitCode, exitStatus) {
+      opacityReadDeadline.stop()
+      if (!failed && exitCode === 0 && exitStatus === 0 && address === root.pipAddress) {
+        var values = collected.trim().split(/\s+/).map(v => v === "true" ? "1" : v === "false" ? "0" : v)
+        if (values.length === root.opacityProps.length && !values.some(v => !isFinite(Number(v)))) {
+          root.originalOpacity = values
+          root.applyOpacity()
+        }
+      }
+      if (root.active && address !== root.pipAddress) root.captureOpacity()
+    }
+  }
+
+  Timer {
+    id: opacityReadDeadline
+    interval: 1500
+    onTriggered: {
+      opacityRead.failed = true
+      opacityRead.collected = ""
+      console.warn(root.pluginId + ": hyprctl getprop timed out")
+      opacityRead.signal(9)
+    }
   }
 
   // Coalesce slider movement to one compositor update per frame.
@@ -458,18 +512,51 @@ Item {
   Process {
     id: clientsProc
     property bool rerun: false
-    command: ["hyprctl", "clients", "-j"]
-    stdout: StdioCollector {
-      onStreamFinished: root.applyClients(text)
+    property string collected: ""
+    property bool failed: false
+    clearEnvironment: true
+    environment: root.hyprlandEnvironment()
+    workingDirectory: "/"
+    command: ["/usr/bin/hyprctl", "clients", "-j"]
+    stdout: SplitParser {
+      // Raw chunks keep the parser from buffering an unlimited partial line.
+      splitMarker: ""
+      onRead: function(data) {
+        root.appendBoundedOutput(clientsProc, data, root.clientsOutputLimit, "hyprctl clients output")
+      }
     }
-    onExited: {
-      if (rerun) { rerun = false; running = true }
+    onStarted: clientsDeadline.restart()
+    onExited: function(exitCode, exitStatus) {
+      clientsDeadline.stop()
+      var succeeded = !failed && exitCode === 0 && exitStatus === 0
+      if (succeeded) root.applyClients(collected)
+      var runAgain = succeeded && rerun
+      rerun = false
+      if (runAgain) root.startClientsScan()
     }
+  }
+
+  Timer {
+    id: clientsDeadline
+    interval: 2000
+    onTriggered: {
+      clientsProc.failed = true
+      clientsProc.collected = ""
+      clientsProc.rerun = false
+      console.warn(root.pluginId + ": hyprctl clients timed out")
+      clientsProc.signal(9)
+    }
+  }
+
+  function startClientsScan() {
+    clientsProc.collected = ""
+    clientsProc.failed = false
+    clientsProc.running = true
   }
 
   function scan() {
     if (clientsProc.running) clientsProc.rerun = true
-    else clientsProc.running = true
+    else startClientsScan()
   }
 
   Timer {
@@ -500,23 +587,68 @@ Item {
 
   Component.onCompleted: scan()
   Component.onDestruction: {
+    opacityReadDeadline.stop()
+    clientsDeadline.stop()
+    cursorWatchRestart.stop()
+    cursorWatchKill.stop()
+    opacityRead.signal(9)
+    clientsProc.signal(9)
+    cursorWatch.signal(9)
     if (active && (mode === "hidden" || screensaverActive)) moveWindow(home.x, home.y, false)
     clearOpacity()
   }
 
   // ---- pointer -------------------------------------------------------------
 
+  readonly property bool cursorWatchWanted:
+    root.active && !root.screensaverActive && (root.autoHide || root.mode === "opacity")
+
+  onCursorWatchWantedChanged: {
+    cursorWatchRestart.stop()
+    if (cursorWatchWanted) {
+      cursorWatchKill.stop()
+      if (!cursorWatch.running) cursorWatch.running = true
+    } else if (cursorWatch.running) {
+      // Process.running=false sends SIGTERM; escalate if cleanup stalls.
+      cursorWatch.running = false
+      cursorWatchKill.restart()
+    }
+  }
+
   Process {
-    running: root.active && !root.screensaverActive && (root.autoHide || root.mode === "opacity")
-    command: [root.pluginDir + "scripts/cursor-watch", String(root.pollInterval)]
+    id: cursorWatch
+    clearEnvironment: true
+    environment: root.hyprlandEnvironment()
+    workingDirectory: "/"
+    command: ["/usr/bin/python3", "-I", "-S", root.pluginDir + "scripts/cursor-watch", String(root.pollInterval)]
     stdout: SplitParser {
       onRead: line => {
         var parts = line.split(" ")
-        root.cursorX = parseInt(parts[0])
-        root.cursorY = parseInt(parts[1])
+        if (parts.length !== 2) return
+        var x = Number(parts[0]), y = Number(parts[1])
+        if (!Number.isInteger(x) || !Number.isInteger(y)) return
+        root.cursorX = x
+        root.cursorY = y
         root.evaluate()
       }
     }
+    onStarted: cursorWatchKill.stop()
+    onExited: {
+      cursorWatchKill.stop()
+      if (root.cursorWatchWanted) cursorWatchRestart.restart()
+    }
+  }
+
+  Timer {
+    id: cursorWatchRestart
+    interval: 1000
+    onTriggered: if (root.cursorWatchWanted && !cursorWatch.running) cursorWatch.running = true
+  }
+
+  Timer {
+    id: cursorWatchKill
+    interval: 500
+    onTriggered: cursorWatch.signal(9)
   }
 
   function evaluate() {
