@@ -77,6 +77,19 @@ Item {
   readonly property int showDelay: Math.max(0, Number(setting("showDelay", 120)) || 0)
   readonly property int pollInterval: Math.max(5, Number(setting("pollInterval", 33)) || 33)
   property bool autoHide: true
+  property bool preventFocus: true
+  onPreventFocusChanged: registerWindowRules()
+
+  // Named rules are updated in place, so re-registering on every load or
+  // config reload never stacks duplicates, and preventFocus off disables them.
+  function registerWindowRules() {
+    var rule = "enabled = " + (preventFocus ? "true" : "false")
+      + ", no_initial_focus = true, focus_on_activate = false"
+    Hyprland.dispatch("(function() "
+      + "hl.window_rule({ name = 'turbinebmw-pip-focus-tag', match = { tag = 'pip' }, " + rule + " }) "
+      + "hl.window_rule({ name = 'turbinebmw-pip-focus-title', match = { title = '(Picture.?in.?[Pp]icture)' }, " + rule + " }) "
+      + "return hl.dsp.no_op() end)()")
+  }
 
   FileView {
     path: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
@@ -87,6 +100,7 @@ Item {
         var plugins = JSON.parse(text()).plugins || []
         root.settings = plugins.find(p => p && p.id === root.pluginId) || ({})
         root.autoHide = root.setting("autoHide", true) === true
+        root.preventFocus = root.setting("preventFocus", true) === true
       } catch (e) {
         console.warn(root.pluginId + ": could not read settings:", e)
       }
@@ -204,6 +218,10 @@ Item {
   // ---- state ---------------------------------------------------------------
 
   property string pipAddress: ""        // "0x…", empty while there is no PiP
+  // Recently opened windows ("0x…" -> open time in ms). Only these may have
+  // focus handed back, never a PiP the user focused before we adopted it.
+  property var freshAddresses: ({})
+  readonly property int freshWindowMs: 2000
   property int pipW: 0
   property int pipH: 0
   property string screenName: ""
@@ -438,7 +456,25 @@ Item {
     return tags.indexOf("pip") >= 0 || tags.indexOf("pip*") >= 0
   }
 
+  // Socket events name windows in bare hex; hyprctl clients uses "0x…".
+  function markFresh(eventData) {
+    var hex = String(eventData || "").split(",")[0].trim()
+    if (/^[0-9a-fA-F]+$/.test(hex)) freshAddresses["0x" + hex.toLowerCase()] = Date.now()
+  }
+
+  function isFresh(address) {
+    var opened = freshAddresses[address]
+    return opened !== undefined && Date.now() - opened < freshWindowMs
+  }
+
+  function pruneFresh() {
+    var now = Date.now()
+    for (var address in freshAddresses)
+      if (now - freshAddresses[address] >= freshWindowMs) delete freshAddresses[address]
+  }
+
   function applyClients(json) {
+    pruneFresh()
     var clients
     try { clients = JSON.parse(json) } catch (e) { return }
     var wasScreensaverActive = screensaverActive
@@ -482,6 +518,15 @@ Item {
         show(true)
       }
       evaluate()
+
+      // Backstop for the window rules: a PiP that just opened and still took
+      // focus hands it back to the window focused right before it.
+      if (preventFocus && isFresh(pip.address) && pip.focusHistoryID === 0) {
+        var previous = clients
+          .filter(c => c.address !== pip.address && typeof c.focusHistoryID === "number" && c.focusHistoryID > 0)
+          .sort((a, b) => a.focusHistoryID - b.focusHistoryID)[0]
+        if (previous) Hyprland.dispatch("hl.dsp.focus({ window = 'address:" + previous.address + "' })")
+      }
       return
     }
 
@@ -577,15 +622,24 @@ Item {
     target: Hyprland
     function onRawEvent(event) {
       var n = event.name
-      if (n === "openwindow" || n === "closewindow" || n === "windowtitlev2" || n === "changefloatingmode"
-          || n === "fullscreen" || n === "pin" || n === "configreloaded"
-          || n === "monitoraddedv2" || n === "monitorremoved") scanDebounce.restart()
+      if (n === "configreloaded") {
+        root.registerWindowRules()
+        scanDebounce.restart()
+      } else if (n === "openwindow" || n === "closewindow" || n === "windowtitlev2" || n === "changefloatingmode"
+          || n === "fullscreen" || n === "pin"
+          || n === "monitoraddedv2" || n === "monitorremoved") {
+        if (n === "openwindow") root.markFresh(event.data)
+        scanDebounce.restart()
+      }
     }
   }
 
   onUsableChanged: if (active && !dragging) { if (mode === "hidden") hide(false); else show(true) }
 
-  Component.onCompleted: scan()
+  Component.onCompleted: {
+    registerWindowRules()
+    scan()
+  }
   Component.onDestruction: {
     opacityReadDeadline.stop()
     clientsDeadline.stop()
@@ -701,6 +755,7 @@ Item {
     function transparency(): string { if (root.active) root.setMode("opacity"); return root.active ? "ok" : "no pip" }
     function playPause(): string { root.playPause(); return root.player ? "ok" : "no player" }
     function close(): string { root.closePip(); return root.active ? "ok" : "no pip" }
+    function preventFocusToggle(): string { root.preventFocus = !root.preventFocus; return root.preventFocus ? "on" : "off" }
   }
 
   // ---- tab -----------------------------------------------------------------
