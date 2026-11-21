@@ -45,6 +45,7 @@ omarchy-shell pip toggle
 omarchy-shell pip peek
 omarchy-shell pip resize
 omarchy-shell pip transparency
+omarchy-shell pip preventFocusToggle
 ```
 
 To adjust the behavior, add settings to the plugin entry in
@@ -56,12 +57,15 @@ To adjust the behavior, add settings to the plugin entry in
   "margin": 10,
   "hideDelay": 0,
   "showDelay": 120,
-  "autoHide": true
+  "autoHide": true,
+  "preventFocus": true
 }
 ```
 
 `margin` is the edge gap in pixels; delays are milliseconds. Set `autoHide` to
-`false` to keep the window docked without tucking it away. Use
+`false` to keep the window docked without tucking it away. Set `preventFocus` to
+`false` if you want newly spawned PiP windows to take focus (defaults to `true`,
+preventing focus loss when opening new tabs or navigating away from media). Use
 `omarchy-shell pip transparency` to open the slider when auto-hide is disabled.
 The optional `pollInterval` setting controls pointer sampling and defaults to 33 ms.
 

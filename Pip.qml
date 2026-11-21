@@ -77,6 +77,21 @@ Item {
   readonly property int showDelay: Math.max(0, Number(setting("showDelay", 120)) || 0)
   readonly property int pollInterval: Math.max(5, Number(setting("pollInterval", 33)) || 33)
   property bool autoHide: true
+  property bool preventFocus: true
+  onPreventFocusChanged: if (preventFocus) registerWindowRules()
+
+  function registerWindowRules() {
+    if (!preventFocus) return
+    Hyprland.dispatch("(function() "
+      + "if o and o.window then "
+      + "o.window({ tag = 'pip' }, { no_initial_focus = true, focus_on_activate = false }) "
+      + "o.window({ title = '(Picture.?in.?[Pp]icture)' }, { no_initial_focus = true, focus_on_activate = false }) "
+      + "elseif hl and hl.window_rule then "
+      + "hl.window_rule({ match = { tag = 'pip' }, no_initial_focus = true, focus_on_activate = false }) "
+      + "hl.window_rule({ match = { title = '(Picture.?in.?[Pp]icture)' }, no_initial_focus = true, focus_on_activate = false }) "
+      + "end "
+      + "return hl.dsp.no_op() end)()")
+  }
 
   FileView {
     path: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
@@ -87,6 +102,7 @@ Item {
         var plugins = JSON.parse(text()).plugins || []
         root.settings = plugins.find(p => p && p.id === root.pluginId) || ({})
         root.autoHide = root.setting("autoHide", true) === true
+        root.preventFocus = root.setting("preventFocus", true) === true
       } catch (e) {
         console.warn(root.pluginId + ": could not read settings:", e)
       }
@@ -204,6 +220,7 @@ Item {
   // ---- state ---------------------------------------------------------------
 
   property string pipAddress: ""        // "0x…", empty while there is no PiP
+  property string lastFocusedAddress: ""
   property int pipW: 0
   property int pipH: 0
   property string screenName: ""
@@ -482,6 +499,22 @@ Item {
         show(true)
       }
       evaluate()
+
+      if (root.preventFocus && pip.focusHistoryID === 0) {
+        var prevAddress = ""
+        if (root.lastFocusedAddress && root.lastFocusedAddress !== pip.address) {
+          var known = clients.find(c => c.address === root.lastFocusedAddress)
+          if (known) prevAddress = known.address
+        }
+        if (!prevAddress) {
+          var otherClients = clients.filter(c => c.address !== pip.address && typeof c.focusHistoryID === "number" && c.focusHistoryID > 0)
+          otherClients.sort((a, b) => a.focusHistoryID - b.focusHistoryID)
+          if (otherClients.length > 0) prevAddress = otherClients[0].address
+        }
+        if (prevAddress) {
+          Hyprland.dispatch("hl.dsp.focus({ window = 'address:" + prevAddress + "' })")
+        }
+      }
       return
     }
 
@@ -577,15 +610,28 @@ Item {
     target: Hyprland
     function onRawEvent(event) {
       var n = event.name
-      if (n === "openwindow" || n === "closewindow" || n === "windowtitlev2" || n === "changefloatingmode"
-          || n === "fullscreen" || n === "pin" || n === "configreloaded"
-          || n === "monitoraddedv2" || n === "monitorremoved") scanDebounce.restart()
+      if (n === "activewindowv2") {
+        var addr = String(event.data || "").trim()
+        if (addr !== "" && addr !== root.pipAddress) {
+          root.lastFocusedAddress = addr
+        }
+      } else if (n === "configreloaded") {
+        root.registerWindowRules()
+        scanDebounce.restart()
+      } else if (n === "openwindow" || n === "closewindow" || n === "windowtitlev2" || n === "changefloatingmode"
+          || n === "fullscreen" || n === "pin"
+          || n === "monitoraddedv2" || n === "monitorremoved") {
+        scanDebounce.restart()
+      }
     }
   }
 
   onUsableChanged: if (active && !dragging) { if (mode === "hidden") hide(false); else show(true) }
 
-  Component.onCompleted: scan()
+  Component.onCompleted: {
+    registerWindowRules()
+    scan()
+  }
   Component.onDestruction: {
     opacityReadDeadline.stop()
     clientsDeadline.stop()
@@ -701,6 +747,7 @@ Item {
     function transparency(): string { if (root.active) root.setMode("opacity"); return root.active ? "ok" : "no pip" }
     function playPause(): string { root.playPause(); return root.player ? "ok" : "no player" }
     function close(): string { root.closePip(); return root.active ? "ok" : "no pip" }
+    function preventFocusToggle(): string { root.preventFocus = !root.preventFocus; return root.preventFocus ? "on" : "off" }
   }
 
   // ---- tab -----------------------------------------------------------------
